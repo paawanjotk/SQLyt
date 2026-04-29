@@ -2,9 +2,17 @@
 /db
 *.o
 *.out
+.build/
+
+# Benchmark harness (generated workloads + timing output)
+bench/workloads/
+bench/workloads_*/
+bench/results*.jsonl
 
 # Local database files
 *.db
+*.db-wal
+*.db-shm
 
 # Python cache files
 __pycache__/

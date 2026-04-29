@@ -344,9 +344,10 @@ void pager_commit_transaction_sync(Pager* pager) {
   pthread_mutex_unlock(&pager->wal_mutex);
 
   if (should_checkpoint) {
-    pthread_t checkpoint_thread;
-    pthread_create(&checkpoint_thread, NULL, background_checkpoint_task, pager);
-    pthread_detach(checkpoint_thread);
+    /* Synchronous checkpoint to keep benchmarking deterministic and avoid
+       races with shutdown closing file descriptors while a detached thread
+       is still running. */
+    background_checkpoint_task(pager);
   }
 }
 

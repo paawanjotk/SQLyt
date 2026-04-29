@@ -15,6 +15,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct {
@@ -145,8 +146,16 @@ typedef struct {
   Table* database;
 } Session;
 
+typedef struct {
+  bool quiet;          /* suppress prompts and normal output */
+  bool timer_enabled;  /* print per-statement elapsed time */
+  bool in_transaction; /* defer commit until .commit */
+} RunOptions;
+
+extern RunOptions g_run_options;
+
 #define PAGE_SIZE 4096
-#define TABLE_MAX_PAGES 400
+#define TABLE_MAX_PAGES 2000
 #define INVALID_PAGE_NUM UINT32_MAX
 #define WAL_CHECKPOINT_THRESHOLD 100
 

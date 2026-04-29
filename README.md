@@ -94,6 +94,17 @@ Optional custom root folder:
 ./db /path/to/root
 ```
 
+Additional flags (benchmarking-friendly):
+
+```bash
+./db --root /path/to/root --run workload.sql --quiet --timer
+```
+
+- `--run <file>`: execute a script non-interactively and exit.
+- `--quiet`: suppress prompts and normal output (errors may still print).
+- `--timer`: print per-statement elapsed time (disabled in `--quiet`).
+- `--root <path>`: explicit root folder (equivalent to the positional root arg).
+
 ## Command Cheat Sheet
 
 ### Meta commands
@@ -132,6 +143,15 @@ Optional custom root folder:
 
 ```text
 .constants
+```
+
+7. Benchmarking helpers
+
+```text
+.quiet on|off
+.timer on|off
+.begin
+.commit
 ```
 
 ### SQL commands

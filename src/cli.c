@@ -1,5 +1,7 @@
 #include "sqlyt.h"
 
+RunOptions g_run_options = {0};
+
 InputBuffer* new_input_buffer() {
   InputBuffer* input_buffer = malloc(sizeof(InputBuffer));
   input_buffer->buffer = NULL;
@@ -14,7 +16,7 @@ void print_prompt() { printf("db > "); }
 void read_input(InputBuffer* input_buffer) {
   if (isatty(STDIN_FILENO) && init_readline_if_needed()) {
     char* line;
-    line = g_readline_api.readline_fn("db > ");
+    line = g_readline_api.readline_fn(g_run_options.quiet ? "" : "db > ");
     if (line == NULL) {
       free(input_buffer->buffer);
       input_buffer->buffer = strdup(".exit");
@@ -26,7 +28,7 @@ void read_input(InputBuffer* input_buffer) {
       input_buffer->buffer_length = 6;
       return;
     }
-    if (line[0] != '\0') {
+    if (!g_run_options.quiet && line[0] != '\0') {
       g_readline_api.add_history_fn(line);
     }
     free(input_buffer->buffer);
@@ -37,8 +39,10 @@ void read_input(InputBuffer* input_buffer) {
   }
 
   if (isatty(STDIN_FILENO)) {
-    print_prompt();
-    fflush(stdout);
+    if (!g_run_options.quiet) {
+      print_prompt();
+      fflush(stdout);
+    }
   }
 
   ssize_t bytes_read =
@@ -309,6 +313,17 @@ SqlExecuteResult execute_select(Table* db, const SqlStatement* stmt) {
     return SQL_EXEC_SELECT_LAYOUT_INVALID;
   }
 
+  if (g_run_options.quiet) {
+    cursor = table_start(&target);
+    while (!cursor->end_of_table) {
+      row_count++;
+      cursor_advance(cursor);
+    }
+    free(cursor);
+    (void)row_count;
+    return SQL_EXEC_OK;
+  }
+
   for (uint32_t i = 0; i < schema.column_count; i++) {
     widths[i] = strlen(schema.column_names[i]);
   }
@@ -539,6 +554,16 @@ SqlExecuteResult execute_statement(Session* session, const SqlStatement* stmt) {
 }
 
 static void print_sql_execute_result(SqlExecuteResult r) {
+  if (g_run_options.quiet) {
+    /* In quiet mode, only print user-visible errors that are emitted elsewhere. */
+    if (r == SQL_EXEC_WRONG_VALUE_COUNT ||
+        r == SQL_EXEC_INSERT_VALIDATION_FAILED) {
+      return;
+    }
+    if (r == SQL_EXEC_OK) {
+      return;
+    }
+  }
   switch (r) {
     case SQL_EXEC_OK:
       printf("Executed.\n");
@@ -599,6 +624,11 @@ static void print_sql_execute_result(SqlExecuteResult r) {
 }
 
 void execute_sql(Session* session, const SqlStatement* stmt) {
+  struct timespec t0, t1;
+  if (g_run_options.timer_enabled) {
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+  }
+
   SqlExecuteResult r = execute_statement(session, stmt);
   print_sql_execute_result(r);
   
@@ -606,8 +636,19 @@ void execute_sql(Session* session, const SqlStatement* stmt) {
       (stmt->type == SQL_STMT_INSERT || stmt->type == SQL_STMT_CREATE_TABLE ||
        stmt->type == SQL_STMT_CREATE_DATABASE || stmt->type == SQL_STMT_DELETE ||
        stmt->type == SQL_STMT_UPDATE || stmt->type == SQL_STMT_DROP_TABLE)) {
-    if (session->database && session->database->pager) {
-      pager_commit_transaction_sync(session->database->pager);
+    if (!g_run_options.in_transaction) {
+      if (session->database && session->database->pager) {
+        pager_commit_transaction_sync(session->database->pager);
+      }
+    }
+  }
+
+  if (g_run_options.timer_enabled) {
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 +
+                (double)(t1.tv_nsec - t0.tv_nsec) / 1000000.0;
+    if (!g_run_options.quiet) {
+      printf("Time: %.3f ms\n", ms);
     }
   }
 }
@@ -615,6 +656,55 @@ void execute_sql(Session* session, const SqlStatement* stmt) {
 MetaCommandResult do_meta_command(Session* session, InputBuffer* input_buffer) {
   if (strcmp(input_buffer->buffer, ".exit") == 0) {
     return META_COMMAND_EXIT;
+  }
+
+  if (strncmp(input_buffer->buffer, ".quiet", 6) == 0 &&
+      (input_buffer->buffer[6] == ' ' || input_buffer->buffer[6] == '\t' ||
+       input_buffer->buffer[6] == '\0')) {
+    const char* arg = input_buffer->buffer + 6;
+    while (*arg == ' ' || *arg == '\t') arg++;
+    if (strcasecmp(arg, "on") == 0) {
+      g_run_options.quiet = true;
+    } else if (strcasecmp(arg, "off") == 0 || *arg == '\0') {
+      g_run_options.quiet = false;
+    } else if (!g_run_options.quiet) {
+      printf("Usage: .quiet on|off\n");
+    }
+    return META_COMMAND_SUCCESS;
+  }
+
+  if (strncmp(input_buffer->buffer, ".timer", 6) == 0 &&
+      (input_buffer->buffer[6] == ' ' || input_buffer->buffer[6] == '\t' ||
+       input_buffer->buffer[6] == '\0')) {
+    const char* arg = input_buffer->buffer + 6;
+    while (*arg == ' ' || *arg == '\t') arg++;
+    if (strcasecmp(arg, "on") == 0) {
+      g_run_options.timer_enabled = true;
+    } else if (strcasecmp(arg, "off") == 0 || *arg == '\0') {
+      g_run_options.timer_enabled = false;
+    } else if (!g_run_options.quiet) {
+      printf("Usage: .timer on|off\n");
+    }
+    return META_COMMAND_SUCCESS;
+  }
+
+  if (strcmp(input_buffer->buffer, ".begin") == 0) {
+    g_run_options.in_transaction = true;
+    if (!g_run_options.quiet) {
+      printf("Transaction started.\n");
+    }
+    return META_COMMAND_SUCCESS;
+  }
+
+  if (strcmp(input_buffer->buffer, ".commit") == 0) {
+    if (session->database && session->database->pager) {
+      pager_commit_transaction_sync(session->database->pager);
+    }
+    g_run_options.in_transaction = false;
+    if (!g_run_options.quiet) {
+      printf("Transaction committed.\n");
+    }
+    return META_COMMAND_SUCCESS;
   }
 
   if (strncmp(input_buffer->buffer, ".usedatabase", 12) == 0 &&
@@ -626,27 +716,31 @@ MetaCommandResult do_meta_command(Session* session, InputBuffer* input_buffer) {
       db_name++;
     }
     if (*db_name == '\0') {
-      printf("Unable to use database.\n");
+      if (!g_run_options.quiet) printf("Unable to use database.\n");
       return META_COMMAND_SUCCESS;
     }
     if (!switch_database(session, db_name)) {
-      printf("Unable to use database.\n");
+      if (!g_run_options.quiet) printf("Unable to use database.\n");
     } else {
-      printf("Using database %s\n", db_name);
+      if (!g_run_options.quiet) printf("Using database %s\n", db_name);
     }
     return META_COMMAND_SUCCESS;
   }
 
   if (strcmp(input_buffer->buffer, ".showdatabases") == 0) {
+    if (g_run_options.quiet) return META_COMMAND_SUCCESS;
     list_databases(session->root_path);
     return META_COMMAND_SUCCESS;
   }
 
   if (strcmp(input_buffer->buffer, ".showtables") == 0) {
     if (!session->has_active_database || session->database == NULL) {
-      printf("No active database. Use .usedatabase <name>.\n");
+      if (!g_run_options.quiet) {
+        printf("No active database. Use .usedatabase <name>.\n");
+      }
       return META_COMMAND_SUCCESS;
     }
+    if (g_run_options.quiet) return META_COMMAND_SUCCESS;
     show_tables(session->database);
     return META_COMMAND_SUCCESS;
   }
@@ -656,27 +750,33 @@ MetaCommandResult do_meta_command(Session* session, InputBuffer* input_buffer) {
     SqlSchema schema;
     uint32_t root_page;
     if (!session->has_active_database || session->database == NULL) {
-      printf("No active database. Use .usedatabase <name>.\n");
+      if (!g_run_options.quiet) {
+        printf("No active database. Use .usedatabase <name>.\n");
+      }
       return META_COMMAND_SUCCESS;
     }
     if (!master_find_table(session->database, table_name, &schema, &root_page)) {
-      printf("Error: Table not found.\n");
+      if (!g_run_options.quiet) printf("Error: Table not found.\n");
       return META_COMMAND_SUCCESS;
     }
     Table layout_table;
     if (!table_init_user(&layout_table, session->database->pager, root_page,
                          &schema)) {
-      printf("Error: Invalid table layout.\n");
+      if (!g_run_options.quiet) printf("Error: Invalid table layout.\n");
       return META_COMMAND_SUCCESS;
     }
-    printf("Tree:\n");
-    print_tree(session->database->pager, root_page, 0, layout_table.cell_size);
+    if (!g_run_options.quiet) {
+      printf("Tree:\n");
+      print_tree(session->database->pager, root_page, 0, layout_table.cell_size);
+    }
     return META_COMMAND_SUCCESS;
   }
 
   if (strcmp(input_buffer->buffer, ".constants") == 0) {
-    printf("Constants:\n");
-    print_constants();
+    if (!g_run_options.quiet) {
+      printf("Constants:\n");
+      print_constants();
+    }
     return META_COMMAND_SUCCESS;
   }
 
