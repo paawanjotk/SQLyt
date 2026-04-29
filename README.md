@@ -222,3 +222,6 @@ select * from user
 .btree user
 .exit
 ```
+
+## Acknowledgements
+Built on top of cstack's implementation guide of mini SQLite
