@@ -223,5 +223,48 @@ select * from user
 .exit
 ```
 
+## Benchmarks
+
+This repo includes a small, deterministic benchmark harness under `bench/` that runs the same generated SQL workloads against **SQLyt** and **SQLite**.
+
+### Reproduce
+
+```bash
+make build
+python3 bench/gen_workloads.py --out bench/workloads --rows 10000 --seed 1
+
+# SQLyt (defaults to 5 trials/workload)
+python3 bench/run_sqlyt.py --db ./db --workloads bench/workloads --trials 5
+
+# SQLite baseline (preferred: sqlite3 CLI; fallback: Python sqlite3 module)
+python3 bench/run_sqlite.py --engine cli --workloads bench/workloads --trials 5
+python3 bench/run_sqlite.py --engine python --workloads bench/workloads --trials 5
+```
+
+### Results (5-trial mean; lower is better)
+
+Workloads are generated in two variants:
+- **`__autocommit`**: each statement commits independently (worst-case commit overhead)
+- **`__grouped`**: mutating statements are wrapped in `.begin`/`.commit`
+
+Headline: **SQLyt is ~7×–113× faster than SQLite on autocommit-heavy write workloads** in this harness, while **SQLite is currently faster on grouped-transaction workloads**.
+
+| Workload | SQLyt mean (s) | SQLite mean (s) | Speedup (SQLite/SQLyt) |
+| --- | ---: | ---: | ---: |
+| W1 insert-seq (autocommit) | 0.131 | 6.894 | 52.8× |
+| W2 insert-rand (autocommit) | 0.159 | 7.958 | 50.1× |
+| W3 update-rand (autocommit) | 0.104 | 4.385 | 42.1× |
+| W4 delete-rand (autocommit) | 0.112 | 4.410 | 39.5× |
+| W5 scan (autocommit) | 0.069 | 0.485 | 7.0× |
+| W6 churn (autocommit) | 0.970 | 109.423 | 112.8× |
+| W1 insert-seq (grouped) | 0.073 | 0.063 | 0.9× |
+| W2 insert-rand (grouped) | 0.072 | 0.039 | 0.5× |
+| W3 update-rand (grouped) | 0.071 | 0.028 | 0.4× |
+| W4 delete-rand (grouped) | 0.071 | 0.025 | 0.4× |
+| W5 scan (grouped) | 0.077 | 0.020 | 0.3× |
+| W6 churn (grouped) | 0.255 | 0.203 | 0.8× |
+
+Memory note: in these runs, **SQLyt used ~5–6 MB peak RSS** vs **~19–40 MB** for SQLite, depending on workload.
+
 ## Acknowledgements
 Built on top of cstack's implementation guide of mini SQLite
