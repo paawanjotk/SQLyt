@@ -93,6 +93,11 @@ def main() -> int:
     ap.add_argument("--workloads", required=True, help="Folder containing *.sql workloads")
     ap.add_argument("--trials", type=int, default=5)
     ap.add_argument("--out", default="bench/results_sqlyt.jsonl", help="JSONL output path")
+    ap.add_argument(
+        "--pattern",
+        default="W*__*.sql",
+        help="Workload filename glob (default: W*__*.sql). Use '*.sql' to include all.",
+    )
     args = ap.parse_args()
 
     db_path = Path(args.db).resolve()
@@ -100,9 +105,9 @@ def main() -> int:
     out_path = Path(args.out).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    sql_files = sorted([p for p in workloads_dir.iterdir() if p.suffix == ".sql"])
+    sql_files = sorted(workloads_dir.glob(args.pattern))
     if not sql_files:
-        raise SystemExit(f"No .sql workloads found in {workloads_dir}")
+        raise SystemExit(f"No workloads matching {args.pattern} in {workloads_dir}")
 
     all_results: list[TrialResult] = []
     with out_path.open("w", encoding="utf-8") as f:

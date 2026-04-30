@@ -63,7 +63,7 @@ typedef enum {
 #define COLUMN_TYPE_INT 1
 #define COLUMN_TYPE_TEXT 2
 #define DB_HEADER_MAGIC "SQLYTDB1"
-#define DB_FORMAT_VERSION 2
+#define DB_FORMAT_VERSION 3
 #define DB_HEADER_MASTER_ROOT_PAGE 1
 #define DB_HEADER_FIRST_USER_ROOT_PAGE 2
 
@@ -170,6 +170,7 @@ typedef struct {
   uint32_t num_pages;
   uint32_t master_root_page;
   uint32_t next_root_page;
+  uint32_t free_page_head;
   void* pages[TABLE_MAX_PAGES];
   int wal_file_descriptor;
   uint32_t page_to_wal_frame[TABLE_MAX_PAGES];
@@ -184,6 +185,8 @@ typedef struct {
   uint32_t version;
   uint32_t master_root_page;
   uint32_t next_root_page;
+  /* Singly-linked list of free pages (0 = none). Stored inside free pages. */
+  uint32_t free_page_head;
 } DbFileHeader;
 
 struct Table {
@@ -290,6 +293,7 @@ void pager_checkpoint(Pager* pager);
 void pager_commit_transaction_sync(Pager* pager);
 void db_close(Table* table);
 uint32_t get_unused_page_num(Pager* pager);
+void pager_free_page(Pager* pager, uint32_t page_num);
 
 bool ensure_directory(const char* path);
 bool build_path(char* out, size_t out_size, const char* left,

@@ -29,6 +29,8 @@ Run SQLyt benchmarks (5 trials per workload by default):
 python3 bench/run_sqlyt.py --db ./db --workloads bench/workloads --trials 5
 ```
 
+By default the runner uses `--pattern W*__*.sql` so it ignores any debug or scratch SQL files.
+
 Run SQLite baseline using the same workloads:
 
 ```bash

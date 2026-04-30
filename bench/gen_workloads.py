@@ -16,6 +16,7 @@ class WorkloadSpec:
     seed: int
     updates: int
     deletes: int    
+    churn_cycles: int
 
 
 SCHEMA_SQLYT = """create database benchdb
@@ -83,6 +84,31 @@ def _workload_common(spec: WorkloadSpec, ids_for_load: list[int], *, grouped: bo
     return lines
 
 
+def _workload_churn(spec: WorkloadSpec, *, grouped: bool) -> list[str]:
+    """
+    Stress test for free-page reuse: repeatedly insert then delete the same key range.
+    If pages are not recycled, the DB file tends to grow with each cycle due to splits.
+    """
+    lines: list[str] = []
+    lines.extend(SCHEMA_SQLYT.strip().splitlines())
+
+    ids = list(range(1, spec.rows + 1))
+    for _ in range(spec.churn_cycles):
+        if grouped:
+            lines.append(".begin")
+
+        lines.extend(_batched_inserts(ids))
+        for k in ids:
+            lines.append(f"delete from user where id = {k}")
+
+        if grouped:
+            lines.append(".commit")
+
+    lines.append("select * from user")
+    lines.append(".exit")
+    return lines
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, help="Output folder, e.g. bench/workloads")
@@ -90,9 +116,16 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--updates", type=int, default=2_000)
     ap.add_argument("--deletes", type=int, default=2_000)
+    ap.add_argument("--churn-cycles", type=int, default=5)
     args = ap.parse_args()
 
-    spec = WorkloadSpec(rows=args.rows, seed=args.seed, updates=args.updates, deletes=args.deletes)
+    spec = WorkloadSpec(
+        rows=args.rows,
+        seed=args.seed,
+        updates=args.updates,
+        deletes=args.deletes,
+        churn_cycles=args.churn_cycles,
+    )
     out_dir = os.path.abspath(args.out)
 
     ids_seq = list(range(1, spec.rows + 1))
@@ -114,23 +147,54 @@ def main() -> int:
     # W3 Update-only
     for grouped in (False, True):
         variant = "grouped" if grouped else "autocommit"
-        spec_u = WorkloadSpec(rows=spec.rows, seed=spec.seed, updates=spec.updates, deletes=0)
+        spec_u = WorkloadSpec(
+            rows=spec.rows,
+            seed=spec.seed,
+            updates=spec.updates,
+            deletes=0,
+            churn_cycles=spec.churn_cycles,
+        )
         lines = _workload_common(spec_u, ids_seq, grouped=grouped)
         _write_sql(os.path.join(out_dir, f"W3_update_rand__{variant}.sql"), lines)
 
     # W4 Delete-only
     for grouped in (False, True):
         variant = "grouped" if grouped else "autocommit"
-        spec_d = WorkloadSpec(rows=spec.rows, seed=spec.seed, updates=0, deletes=spec.deletes)
+        spec_d = WorkloadSpec(
+            rows=spec.rows,
+            seed=spec.seed,
+            updates=0,
+            deletes=spec.deletes,
+            churn_cycles=spec.churn_cycles,
+        )
         lines = _workload_common(spec_d, ids_seq, grouped=grouped)
         _write_sql(os.path.join(out_dir, f"W4_delete_rand__{variant}.sql"), lines)
 
     # W5 Scan-only (load then scan)
     for grouped in (False, True):
         variant = "grouped" if grouped else "autocommit"
-        spec_s = WorkloadSpec(rows=spec.rows, seed=spec.seed, updates=0, deletes=0)
+        spec_s = WorkloadSpec(
+            rows=spec.rows,
+            seed=spec.seed,
+            updates=0,
+            deletes=0,
+            churn_cycles=spec.churn_cycles,
+        )
         lines = _workload_common(spec_s, ids_seq, grouped=grouped)
         _write_sql(os.path.join(out_dir, f"W5_scan__{variant}.sql"), lines)
+
+    # W6 Churn: insert/delete cycles to test free-page reuse
+    for grouped in (False, True):
+        variant = "grouped" if grouped else "autocommit"
+        spec_c = WorkloadSpec(
+            rows=spec.rows,
+            seed=spec.seed,
+            updates=0,
+            deletes=0,
+            churn_cycles=spec.churn_cycles,
+        )
+        lines = _workload_churn(spec_c, grouped=grouped)
+        _write_sql(os.path.join(out_dir, f"W6_churn__{variant}.sql"), lines)
 
     print(f"Wrote workloads to: {out_dir}")
     return 0

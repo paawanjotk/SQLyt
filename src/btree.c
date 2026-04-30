@@ -40,7 +40,7 @@ const uint32_t INTERNAL_NODE_CHILD_SIZE = sizeof(uint32_t);
 const uint32_t INTERNAL_NODE_CELL_SIZE =
     INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_KEY_SIZE;
 /* Keep this small for testing */
-const uint32_t INTERNAL_NODE_MAX_KEYS = 3;
+const uint32_t INTERNAL_NODE_MAX_KEYS = 20;
 
 /*
  * Leaf Node Header Layout
@@ -98,26 +98,35 @@ uint32_t* internal_node_cell(void* node, uint32_t cell_num) {
                      cell_num * INTERNAL_NODE_CELL_SIZE);
 }
 
-uint32_t* internal_node_child(void* node, uint32_t child_num) {
+static uint32_t* internal_node_child_ptr(void* node, uint32_t child_num) {
   uint32_t num_keys = *internal_node_num_keys(node);
   if (child_num > num_keys) {
     printf("Tried to access child_num %d > num_keys %d\n", child_num, num_keys);
     exit(EXIT_FAILURE);
   } else if (child_num == num_keys) {
-    uint32_t* right_child = internal_node_right_child(node);
-    if (*right_child == INVALID_PAGE_NUM) {
-      printf("Tried to access right child of node, but was invalid page\n");
-      exit(EXIT_FAILURE);
-    }
-    return right_child;
+    return internal_node_right_child(node);
   } else {
-    uint32_t* child = internal_node_cell(node, child_num);
-    if (*child == INVALID_PAGE_NUM) {
-      printf("Tried to access child %d of node, but was invalid page\n", child_num);
-      exit(EXIT_FAILURE);
-    }
-    return child;
+    return internal_node_cell(node, child_num);
   }
+}
+
+uint32_t* internal_node_child(void* node, uint32_t child_num) {
+  uint32_t* p = internal_node_child_ptr(node, child_num);
+  uint32_t v = *p;
+  if (v == INVALID_PAGE_NUM) {
+    if (child_num == *internal_node_num_keys(node)) {
+      printf("Tried to access right child of node, but was invalid page\n");
+    } else {
+      printf("Tried to access child %d of node, but was invalid page\n", child_num);
+    }
+    exit(EXIT_FAILURE);
+  }
+  if (v >= TABLE_MAX_PAGES) {
+    printf("Tried to access child %u out of bounds at index %u (num_keys=%u)\n",
+           v, child_num, *internal_node_num_keys(node));
+    exit(EXIT_FAILURE);
+  }
+  return p;
 }
 
 uint32_t* internal_node_key(void* node, uint32_t key_num) {
@@ -579,7 +588,7 @@ void internal_node_insert(Table* table, uint32_t parent_page_num,
 
   if (child_max_key > get_node_max_key(table, right_child)) {
     /* Replace right child */
-    *internal_node_child(parent, original_num_keys) = right_child_page_num;
+    *internal_node_child_ptr(parent, original_num_keys) = right_child_page_num;
     *internal_node_key(parent, original_num_keys) =
         get_node_max_key(table, right_child);
     *internal_node_right_child(parent) = child_page_num;
@@ -590,7 +599,7 @@ void internal_node_insert(Table* table, uint32_t parent_page_num,
       void* source = internal_node_cell(parent, i - 1);
       memcpy(destination, source, INTERNAL_NODE_CELL_SIZE);
     }
-    *internal_node_child(parent, index) = child_page_num;
+    *internal_node_child_ptr(parent, index) = child_page_num;
     *internal_node_key(parent, index) = child_max_key;
   }
 }
@@ -607,7 +616,12 @@ static uint32_t leaf_node_min_cells(const Table* table) {
 static uint32_t internal_node_child_page_at(void* node, uint32_t child_index) {
   uint32_t num_keys = *internal_node_num_keys(node);
   if (child_index == num_keys) {
-    return *internal_node_right_child(node);
+    uint32_t c = *internal_node_right_child(node);
+    if (c != INVALID_PAGE_NUM && c >= TABLE_MAX_PAGES) {
+      printf("Right child out of bounds: %u\n", c);
+      exit(EXIT_FAILURE);
+    }
+    return c;
   }
   return *internal_node_child(node, child_index);
 }
@@ -691,6 +705,8 @@ void internal_rebalance_after_delete(Table* table, uint32_t internal_page_num) {
     set_node_root(node, true);
     mark_page_dirty(table->pager, internal_page_num);
     mark_page_dirty(table->pager, child_page_num);
+    /* child_page_num is no longer referenced after root collapse */
+    pager_free_page(table->pager, child_page_num);
 
     if (get_node_type(node) == NODE_INTERNAL) {
       uint32_t root_num_keys = *internal_node_num_keys(node);
@@ -732,6 +748,8 @@ void internal_rebalance_after_delete(Table* table, uint32_t internal_page_num) {
   mark_page_dirty(table->pager, child_page_num);
   mark_page_dirty(table->pager, internal_page_num);
   internal_node_recompute_keys(table, parent);
+  /* internal_page_num is now unreachable */
+  pager_free_page(table->pager, internal_page_num);
 }
 
 static void rebalance_leaf_after_delete(Cursor* cursor) {
@@ -763,6 +781,12 @@ static void rebalance_leaf_after_delete(Cursor* cursor) {
   if (child_index > 0) {
     uint32_t left_page_num = internal_node_child_page_at(parent, child_index - 1);
     void* left_node = get_page(table->pager, left_page_num);
+    if (get_node_type(left_node) != NODE_LEAF) {
+      // Tree is not perfectly height-balanced; don't corrupt by treating an internal node as a leaf.
+      internal_node_recompute_keys(table, parent);
+      mark_page_dirty(table->pager, parent_page_num);
+      return;
+    }
     uint32_t left_cells = *leaf_node_num_cells(left_node);
 
     if (left_cells > min_cells) {
@@ -783,6 +807,12 @@ static void rebalance_leaf_after_delete(Cursor* cursor) {
   if (child_index < parent_num_keys) {
     uint32_t right_page_num = internal_node_child_page_at(parent, child_index + 1);
     void* right_node = get_page(table->pager, right_page_num);
+    if (get_node_type(right_node) != NODE_LEAF) {
+      // Tree is not perfectly height-balanced; don't corrupt by treating an internal node as a leaf.
+      internal_node_recompute_keys(table, parent);
+      mark_page_dirty(table->pager, parent_page_num);
+      return;
+    }
     uint32_t right_cells = *leaf_node_num_cells(right_node);
 
     if (right_cells > min_cells) {
@@ -815,6 +845,7 @@ static void rebalance_leaf_after_delete(Cursor* cursor) {
     mark_page_dirty(table->pager, left_page_num);
     mark_page_dirty(table->pager, page_num);
     internal_node_remove_child(table, parent_page_num, child_index);
+    pager_free_page(table->pager, page_num);
     cursor->page_num = left_page_num;
     cursor->cell_num = left_cells;
     return;
@@ -835,6 +866,7 @@ static void rebalance_leaf_after_delete(Cursor* cursor) {
     mark_page_dirty(table->pager, right_page_num);
     mark_page_dirty(table->pager, page_num);
     internal_node_remove_child(table, parent_page_num, child_index + 1);
+    pager_free_page(table->pager, right_page_num);
   }
 }
 
@@ -957,7 +989,8 @@ void leaf_node_split_and_insert(Cursor* cursor, uint32_t key,
     } else {
       destination_node = old_node;
     }
-    uint32_t index_within_node = (uint32_t)i % left_split;
+    uint32_t index_within_node =
+        (destination_node == new_node) ? ((uint32_t)i - left_split) : (uint32_t)i;
     void* destination = tbl_leaf_cell(t, destination_node, index_within_node);
 
     if ((uint32_t)i == cursor->cell_num) {

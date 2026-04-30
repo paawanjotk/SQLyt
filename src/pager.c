@@ -114,6 +114,9 @@ bool header_is_valid(const DbFileHeader* header) {
       header->next_root_page >= TABLE_MAX_PAGES) {
     return false;
   }
+  if (header->free_page_head >= TABLE_MAX_PAGES) {
+    return false;
+  }
   return true;
 }
 
@@ -162,6 +165,7 @@ Table* db_open(const char* filename) {
     header->version = DB_FORMAT_VERSION;
     header->master_root_page = DB_HEADER_MASTER_ROOT_PAGE;
     header->next_root_page = DB_HEADER_FIRST_USER_ROOT_PAGE;
+    header->free_page_head = 0;
 
     void* root_node = get_page(pager, header->master_root_page);
     initialize_leaf_node(root_node);
@@ -189,6 +193,7 @@ Table* db_open(const char* filename) {
       header->version = DB_FORMAT_VERSION;
       header->master_root_page = repaired_master_root;
       header->next_root_page = repaired_next_root;
+      header->free_page_head = 0;
       mark_page_dirty(pager, 0);
       pager_commit_transaction_sync(pager);
 
@@ -198,6 +203,7 @@ Table* db_open(const char* filename) {
 
   pager->master_root_page = header->master_root_page;
   pager->next_root_page = header->next_root_page;
+  pager->free_page_head = header->free_page_head;
   table_init_catalog(table, pager);
 
   return table;
@@ -392,11 +398,66 @@ void db_close(Table* table) {
 }
 
 /*
-Until we start recycling free pages, new pages will always
-go onto the end of the database file
+free pages are recycled, through a free page list
 */
 uint32_t get_unused_page_num(Pager* pager) {
+  /* Prefer reusing a free page if available. */
+  void* header_page = get_page(pager, 0);
+  DbFileHeader* header = (DbFileHeader*)header_page;
+  if (header->version == DB_FORMAT_VERSION && header->free_page_head != 0) {
+    uint32_t page_num = header->free_page_head;
+    void* free_page = get_page(pager, page_num);
+    uint32_t next = 0;
+    memcpy(&next, (uint8_t*)free_page + PAGE_SIZE - sizeof(uint32_t),
+           sizeof(uint32_t));
+    header->free_page_head = next;
+    pager->free_page_head = next;
+    mark_page_dirty(pager, 0);
+    /* Clear stale on-page pointers/headers before reuse. */
+    memset(free_page, 0, PAGE_SIZE);
+    mark_page_dirty(pager, page_num);
+    /* Prevent accidental reads from an old WAL frame mapping for this page. */
+    pthread_mutex_lock(&pager->wal_mutex);
+    pager->page_to_wal_frame[page_num] = 0;
+    pthread_mutex_unlock(&pager->wal_mutex);
+    return page_num;
+  }
+
   mark_page_dirty(pager, pager->num_pages);
   return pager->num_pages;
+}
+
+void pager_free_page(Pager* pager, uint32_t page_num) {
+  if (page_num == 0 || page_num >= TABLE_MAX_PAGES) {
+    return;
+  }
+  if (page_num == pager->master_root_page) {
+    return;
+  }
+
+  void* header_page = get_page(pager, 0);
+  DbFileHeader* header = (DbFileHeader*)header_page;
+  if (header->version != DB_FORMAT_VERSION) {
+    return;
+  }
+
+  /* Push the page onto the freelist.
+     Store next pointer at the end of the page so the node header can be made safe. */
+  void* page = get_page(pager, page_num);
+  uint32_t next = header->free_page_head;
+  /* Make the freed page look like an empty leaf node to avoid out-of-bounds
+     traversal if it's accidentally referenced due to a higher-level bug. */
+  memset(page, 0, PAGE_SIZE);
+  ((uint8_t*)page)[0] = (uint8_t)NODE_LEAF; /* node type */
+  ((uint8_t*)page)[1] = 0;                 /* is_root */
+  /* parent pointer (bytes 2..5) already zeroed */
+  /* leaf_node_num_cells at offset 6..9 and next_leaf at 10..13 are zero */
+
+  memcpy((uint8_t*)page + PAGE_SIZE - sizeof(uint32_t), &next, sizeof(uint32_t));
+  header->free_page_head = page_num;
+  pager->free_page_head = page_num;
+
+  mark_page_dirty(pager, page_num);
+  mark_page_dirty(pager, 0);
 }
 
